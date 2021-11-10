@@ -1,0 +1,206 @@
+---
+title: "Smoothing pH and temperature data for easier visualization"
+author: "Amelia Ritger"
+date: "11/9/2021"
+output: html_document
+---
+
+# Load packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      messages = FALSE, 
+                      error = FALSE,
+                      warning = FALSE)
+
+library(tidyverse)
+library(here)
+library(lubridate)
+library(scales) #for plotting time series data
+```
+
+# Read in the data
+```{r}
+raw <- read_csv(here("data","ph_clean.csv")) 
+
+alg <- raw %>%
+  filter(site=="Alegria")
+
+lol <- raw %>%
+  filter(site=="Lompoc Landing")
+
+bml <- raw %>%
+  filter(site=="Bodega Bay")
+```
+
+# First pass low pass filter, loess
+```{r}
+ggplot(bml, aes(x=date_time, y=temp_c)) +
+  geom_point() +
+  geom_smooth(method="loess", span=0.2) #span 0.3 looks similar to method="gam"
+```
+
+## Try low pass loess filtering for all sites
+```{r}
+#set order for sites
+raw$site <- factor(raw$site, levels=c("Lompoc Landing","Alegria","Bodega Bay"))
+
+#set custom color for sites
+pal <- c(
+  "Alegria" = "#CC6677",
+  "Lompoc Landing" = "#44AA99",
+  "Bodega Bay" = "#6699CC"
+)
+
+#Set x axis limits
+lims <- as.POSIXct(strptime(c("2021-05-30 00:00:00", "2021-11-08 23:45:00"), 
+                   format = "%Y-%m-%d %H:%M:%S"))
+
+#Run this for pH
+ggplot(raw, aes(x=date_time, y=p_h, group=site)) +
+  geom_line(aes(color=site), size=0.7, alpha=0.4) +
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  geom_smooth(aes(color=site), method="loess", span=0.1) +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                   labels = date_format("%m/%d %H:%m"),
+                   limits = lims,
+                   expand = c(0, 0)) +
+  #xlab("Date and time") +
+  ylab("pH") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        #element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_blank(),
+        #element_text(size=15),
+        axis.text.y=element_text(size=12),
+        #axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=15),
+        legend.position = "none")
+
+ggsave(here("figures", "smooth_ph.png"), height=20, width=40, units="cm")
+
+#Run this for temperature
+ggplot(raw, aes(x=date_time, y=temp_c, group=site)) +
+  geom_line(aes(color=site), size=0.7, alpha=0.4) +
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  geom_smooth(aes(color=site), method="loess", span=0.1) + 
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                   labels = date_format("%m/%d %H:%m"),
+                   limits=lims,
+                   expand = c(0, 0)) +
+  #xlab("Date and time") +
+  ylab("Temperature") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        #element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_blank(),
+        #element_text(size=15),
+        axis.text.y=element_text(size=12),
+        #axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=15),
+        legend.position = "none")
+
+ggsave(here("figures", "smooth_temp.png"), height=20, width=40, units="cm")
+```
+
+## Combine these into a single figure 
+```{r}
+raw_combine <- raw %>%
+  select(site, date_time, temp_c, p_h) %>%
+  pivot_longer(cols=temp_c:p_h,
+               names_to = "group",
+               values_to = "value")
+
+ggplot(raw_combine, aes(x=date_time, y=value, group=group, color=site)) +
+  #geom_line(aes(color=site), size=0.7, alpha=0.2) +
+  geom_line(aes(x=date_time, y=value, group=group), data = . %>% filter((site %in% c("Alegria"))), alpha=0.4) + #plot only ALG line
+  geom_line(aes(x=date_time, y=value, group=group), data = . %>% filter((site %in% c("Lompoc Landing"))), alpha=0.4) + #plot only LOL
+  geom_line(aes(x=date_time, y=value, group=group), data = . %>% filter((site %in% c("Bodega Bay"))), alpha=0.4) + #plot only BML
+  geom_smooth(aes(group=site), method="loess", span=0.1, se=FALSE) + 
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  #geom_point(aes(color=group), size=0.5) +
+  scale_x_datetime(breaks = date_breaks("1 week"),
+                   labels = date_format("%b-%d"),
+                   limits = lims,
+                   # limits = as.POSIXct(strptime(c("2021-06-20 07:00",
+                   #                                "2021-10-08 07:00"),
+                   #                              format = "%Y-%m-%d %H:%M")),
+                    # c(as.POSIXct("2021-06-14 00:07:30"),as.POSIXct("2021-10-08 00:07:00")),
+                     expand = c(0, 0)) + 
+  facet_grid(group ~ ., #facet wrap to create one panel for pH and one for temp
+             scales = "free_y",
+             switch="both",
+             labeller = as_labeller(c(temp_c = "Temperature (C)", p_h = "pH"))) + #customize strip labels
+  xlab("Date and time") +
+  ylab(NULL) + #remove "Value" from Y axis label
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=22),
+        #axis.title.x=element_text(size=25),
+        axis.title.x=element_blank(),
+        axis.text.y=element_text(size=22),
+        legend.text=element_text(size=20),
+        legend.title = element_blank(),
+        #element_text(size=25),
+        legend.position = c(0.91,0.60), #customize legend position on plot (bottom right)
+        #legend.position = c(0.92,0.95) #put legend on top right of plot
+        #legend.key.size = unit(4,"line"),
+        #legend.key.height = unit(1,"cm"),
+        strip.background = element_blank(), #remove strip background from facet_grid
+        strip.text.y = element_text(size = 25),
+        strip.placement = "outside") + #place the strip outside of the plot
+  guides(colour = guide_legend(override.aes = list(size=5))) #make the legend line wider, for easier viewing
+
+ggsave(here("figures", "smooth_all.png"), height=20, width=40, units="cm")
+```
+
+#Now do the same thing for LOL data 
+```{r}
+#Read in LOL data
+lol_all <- read_csv(here("data","lol_all.csv"))
+
+lol_prep <- lol_all %>%
+  select(date_time, temp_c, p_h) %>%
+  pivot_longer(cols=temp_c:p_h,
+               names_to = "group",
+               values_to = "value")
+
+count <- 1
+breaks_fun <- function(x) {
+  count <<- count + 1L
+  switch(
+    count,
+    c(7.2, 7.6, 8.0, 8.6),
+    c(5, 10, 15, 20),
+  )
+}
+
+#Set x axis limits
+lims <- as.POSIXct(strptime(c("2021-06-13 00:00:00", "2021-10-09 23:45:00"), 
+                   format = "%Y-%m-%d %H:%M:%S"))
+
+ggplot(lol_prep, aes(x=date_time, y=value, group=group)) +
+  geom_line(aes(color=group), size=0.7, alpha=0.6) +
+  geom_smooth(aes(group=group, color=group), method="loess", span=0.1) + 
+  scale_color_manual(values = c("#117733", "#882255")) + #color lines by custom site color palette
+  scale_x_datetime(breaks = date_breaks("1 week"),
+                   labels = date_format("%b-%d"), #b makes month label June and not 06
+                   limits = lims, #set limits
+                   expand = c(0, 0)) + 
+  facet_grid(group ~ ., #facet wrap to create one panel for pH and one for temp
+             scales = "free",
+             switch="both",
+             labeller = as_labeller(c(temp_c = "Temperature (C)", p_h = "pH"))) + #customize strip labels
+  xlab("Date and time") +
+  ylab(NULL) + #remove "Value" from Y axis label
+  scale_y_continuous(breaks = scales::pretty_breaks(6)) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=22),
+        axis.title.x=element_blank(),
+        axis.text.y=element_text(size=22),
+        legend.position = "none",
+        strip.background = element_blank(), #remove strip background from facet_grid
+        strip.text.y = element_text(size = 25),
+        strip.placement = "outside") + #place the strip outside of the plot
+  guides(colour = guide_legend(override.aes = list(size=5))) #make the legend line wider, for easier viewing
+
+ggsave(here("figures", "smooth_lol.png"), height=20, width=40, units="cm")
+```
