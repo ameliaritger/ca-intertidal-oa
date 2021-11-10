@@ -1,0 +1,885 @@
+---
+title: "Basic sensor data wrangling"
+author: "Amelia Ritger"
+date: "11/9/2021"
+output: html_document
+---
+
+# Load packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      messages = FALSE, 
+                      error = FALSE,
+                      warning = FALSE)
+
+library(tidyverse)
+library(janitor)
+library(here)
+library(lubridate)
+library(scales)
+library(rvest) #to scrape tide data from the internet
+library(reshape) #to ultimately merge BML, LOL, and ALG
+library(gt) #create nice table for presentations
+library(webshot) #save gt() table
+library(highcharter) #create highchart to interact with data
+library(webshot) #save highcharts to .png files
+library(plotly) #create plots with multiple y axes
+library(filesstrings) #move plotly figure to proper folder location
+```
+
+## Read in the data
+```{r}
+all <- read_csv(here("data","sensor-data_all.csv")) %>% 
+  clean_names() %>%
+  mutate(date_time=mdy_hms(date_time), #apply lubridate to date/time column
+         date=format(date_time, '%m/%d/%Y'), #create only date column
+         time=format(date_time, '%H:%M:%S')) %>% #create only time column
+ select(site, sensor_number, date_time, date, time, temp_c, p_h) %>%
+    mutate(site=replace(site, site=="LOL", "Lompoc Landing"),
+           site=replace(site, site=="ALG", "Alegria"),
+           site=replace(site, site=="BML", "Bodega Bay")) #dplyr::rename locations
+```
+
+## Plot up the pH
+```{r}
+#set site order for plotting (legend)
+all$site <- factor(all$site, levels=c("Alegria", "Lompoc Landing", "Bodega Bay"))
+
+all_filter <- all %>%
+  filter(p_h < 8.5) %>%
+  mutate(removeit = ifelse(site=="Alegria" & date_time<ymd_hms("2021-06-30 23:00:00"), "remove", "keep")) %>%
+  filter(removeit=="keep")
+
+ggplot(all_filter, aes(x=date_time, y=p_h, group=site)) +
+  geom_line(aes(color=site), size=0.7) +
+  geom_point(aes(color=site), size=0.5) +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  ylab("pH") +
+  theme_bw() +
+  theme(legend.title=element_blank(),
+        axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_text(size=15),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=15),
+        legend.text=element_text(siz=12))
+
+#ggsave(here("figures", "june-sept.png"), height=20, width=40, units="cm")
+```
+
+### Plot temp up for good measure
+```{r}
+ggplot(all, aes(x=date_time, y=temp_c, group=site)) +
+  geom_line(aes(color=site), size=0.7) +
+  geom_point(aes(color=site), size=0.5) +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+#ggsave(here("figures", "sensors","june-sept_temp.png"), height=20, width=40, units="cm")
+```
+
+# Plot each site, temp and pH 
+
+#### Customize HTML
+
+Sites: 
+
+- Bodega (Bodega%20Harbor%20entrance%2C%20California)
+- Lompoc (Point%20Arguello%2C%20California)
+- Alegria (Gaviota%2C%20California)
+
+Glen: number of days to extract
+
+Interval:
+
+ - 10 minutes (00%3A10)
+ - 15 minutes (00%3A15)
+ - 1 hour (01%3A00)
+
+## BML
+
+### Scrape tide data from http://tbone.biol.sc.edu/tide/
+```{r}
+bml_tide <- read_html("http://tide.arthroinfo.org/tideshow.cgi?tplotdir=horiz;gx=640;gy=240;caltype=ndp;type=mrare;interval=00%3A15;glen=150;units=feet;year=2021;month=05;day=31;hour=09;min=30;tzone=local;d_year=;d_month=01;d_day=01;d_hour=00;d_min=00;ampm24=24;site=Bodega%20Harbor%20entrance%2C%20California") %>%
+  html_elements("pre") %>% #select only the date, time, and tide values from the webpage
+  html_text2() %>% #convert list to data table
+  data.frame() %>% #convert table to data frame
+  mutate(date_tide = str_split(., pattern = "\n")) %>% #split into rows by each time point
+  unnest(date_tide) %>% #unnest into two columns 
+  mutate(date_tide=as.factor(date_tide)) %>% #make column values factors 
+  separate(date_tide, into = c("date", "space", "time", "time_zone", "tide"), sep="\\s") %>% #separate the values (separated by spaces) into their own columns
+  select(-"space", -".") %>% #remove the "space" (blank space) column and duplicated column created by unnest() 
+  unite("time", "time", "time_zone", sep="\ ",) %>% #join together time and time zone
+  unite("date_time", "date", "time", sep="\ ") %>% #join together date and time/time zone
+  drop_na() %>% #remove final row with NA (not sure why that's even there)
+  mutate(date_time=ymd_hm(date_time), #apply lubridate to date/time column
+         tide=as.numeric(tide)) #coerce tide values from character to numeric
+```
+
+### Extract temp values from HOBO logger, clean up for overlap with BML readings
+```{r}
+bml_temp <- read_csv(here("data","hobo_bml.csv")) %>% 
+  filter(row_number()!=1) %>% # remove the first row
+  clean_names() %>%
+  dplyr::rename(timestamp=x2,
+         temp_hobo_f=x3) %>%
+  mutate(date_time=ymd_hms(timestamp), #aapply lubridate to date/time column
+         date=format(date_time, '%m/%d/%Y'), #create only date column
+         time=format(date_time, '%H:%M:%S'), #create only time column
+         temp_hobo_c=((as.numeric(temp_hobo_f)-32)*(5/9))) %>% #convert F to C from HOBO temp data
+  select(temp_hobo_c,date_time) %>% #select the only columns that really matter
+  filter(date_time <= ymd_hms("2021-10-08 19:00:00"),
+         date_time > ymd_hms("2021-06-10 06:15:00")) #remove dates where HOBO was out of field (and first observation when HOBO was deployed, temp is WAY high)
+```
+  
+### Combine the tides with the pH/temp values for BML, plot it up!
+```{r}
+bml_all_tide <- full_join(bml, bml_tide) %>%
+  drop_na(c(tide, p_h)) %>% #whoops, started off collecting data every 10 minutes and then switched to 15 minutes (so account for that by removing pH and tide values that don't overlap)
+  distinct(date_time, .keep_all = TRUE) #remove duplicated data (not sure where those came from)
+
+bml_all <- full_join(bml_all_tide, bml_temp) %>%
+  drop_na(c(temp_c)) %>% #remove hobo measurements taken outside of Durafet measurements
+  dplyr::rename(temp_durafet_c=temp_c) %>% #dplyr::rename column of temp values taken from Durafet
+  mutate(temp_hobo_c=ifelse((date_time==ymd_hms("2021-06-11 08:45:00")), NA, temp_hobo_c)) %>% #some HOBO values are quite odd, replace with NA
+  mutate(temp_c=ifelse(is.na(temp_hobo_c==TRUE), temp_durafet_c, temp_hobo_c)) #the HOBO was deployed weeks after the Durafet, so create a new column accounting for this
+
+bml3 <- bml_all %>%
+  pivot_longer(cols=temp_durafet_c:temp_c,
+               names_to = "data",
+               values_to = "value")
+  
+ggplot(bml3, aes(x=date_time, y=value, group=data)) +
+  geom_line(aes(color=data), size=0.7) +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+#ggsave(here("figures", "bml_pH_temp_tide.png"), height=20, width=40, units="cm")
+```
+
+### Remove measurements where the sensor was out of the water (initially a tide lower than -0.5, but the "heatwave" on 6/15/21 shows how the temperature spikes disappear after filtering for tide of 0.2)
+```{r}
+bml_detide <- bml_all %>%
+  filter(tide>0.2) %>%
+  drop_na(c(p_h)) #drop observations that don't overlap (10 min vs 15 min sampling interval)
+
+ggplot(bml_detide, aes(x=date_time)) +
+  geom_line(aes(y=tide), color="red") + 
+  geom_line(aes(y=temp_c), color="blue") + # Divide by 10 to get the same range than the temperature
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+```
+
+### Let's filter more, now based on anomalous temperature measurements (spikes in July)
+```{r}
+bml_detide_temp <- bml_detide %>%
+  filter(!(date_time >= ymd_hms("2021-07-10 06:00:00") & date_time <= ymd_hms("2021-07-10 07:30:00")),
+         !(date_time >= ymd_hms("2021-07-21 06:15:00") & date_time <= ymd_hms("2021-07-21 07:15:00")),
+         !(date_time >= ymd_hms("2021-07-22 06:15:00") & date_time <= ymd_hms("2021-07-22 08:00:00")),
+         !(date_time >= ymd_hms("2021-07-23 07:15:00") & date_time <= ymd_hms("2021-07-23 08:30:00")))
+
+ggplot(bml_detide_temp, aes(x=date_time)) +
+  geom_line(aes(y=temp_c), color="red") + 
+  geom_line(aes(y=tide), color="blue") + # Divide by 10 to get the same range than the temperature
+  scale_x_datetime(breaks = scales::date_breaks("1 day"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+```
+
+## LOL 
+
+### Scrape tide data from http://tbone.biol.sc.edu/tide/
+```{r}
+lol_tide <- read_html("http:///tide.arthroinfo.org/tideshow.cgi?tplotdir=horiz;gx=640;gy=240;caltype=ndp;type=mrare;interval=00%3A15;glen=150;units=feet;year=2021;month=06;day=14;hour=08;min=00;tzone=local;d_year=;d_month=01;d_day=01;d_hour=00;d_min=00;ampm24=24;site=Point%20Arguello%2C%20California") %>%
+  html_elements("pre") %>% #select only the date, time, and tide values from the webpage
+  html_text2() %>% #convert list to data table
+  data.frame() %>% #convert table to data frame
+  mutate(date_tide = str_split(., pattern = "\n")) %>% #split into rows by each time point
+  unnest(date_tide) %>% #unnest into two columns 
+  mutate(date_tide=as.factor(date_tide)) %>% #make column values factors 
+  separate(date_tide, into = c("date", "space", "time", "time_zone", "tide"), sep="\\s") %>% #separate the values (separated by spaces) into their own columns
+  select(-"space", -".") %>% #remove the "space" (blank space) column and duplicated column created by unnest() 
+  unite("time", "time", "time_zone", sep="\ ",) %>% #join together time and time zone
+  unite("date_time", "date", "time", sep="\ ") %>% #join together date and time/time zone
+  drop_na() %>% #remove final row with NA (not sure why that's even there)
+  mutate(date_time=ymd_hm(date_time), #apply lubridate to date/time column
+         tide=as.numeric(tide)) #coerce tide values from character to numeric
+```
+
+### Extract temp values from HOBO logger, clean up for overlap with LOL readings
+```{r}
+lol_temp <- read_csv(here("data","hobo_lol.csv")) %>% 
+  filter(row_number()!=1) %>% # remove the first row
+  clean_names() %>%
+  dplyr::rename(timestamp=x2,
+         temp_hobo_f=x3) %>%
+  mutate(date_time=ymd_hms(timestamp), #aapply lubridate to date/time column
+         date=format(date_time, '%m/%d/%Y'), #create only date column
+         time=format(date_time, '%H:%M:%S'), #create only time column
+         temp_hobo_c=((as.numeric(temp_hobo_f)-32)*(5/9))) %>% #convert F to C from HOBO temp data
+  select(temp_hobo_c,date_time) #select the only columns that really matter
+```
+
+### Combine the tides with the pH/temp values for LOL, plot it up!
+```{r}
+# filter all data for LOL
+lol <- all %>%
+  filter(site=="Lompoc Landing") %>%
+  distinct(date_time, .keep_all = TRUE) #remove duplicated data (not sure where those came from)
+
+#join HOBO data with Durafet data
+lol_all_1 <- full_join(lol, lol_temp) %>%
+  drop_na(c(temp_c, p_h)) %>% #remove hobo measurements taken outside of Durafet measurements
+  dplyr::rename(temp_durafet_c=temp_c) 
+
+#Check difference between Durafet and HOBO temperature measurements
+lol_temp_diff <- lol_all_1 %>%
+  mutate(diff=temp_durafet_c-temp_hobo_c)
+
+#Plot it up to check for anomalies
+y1 <- lol_temp_diff$temp_durafet_c
+y2 <- lol_temp_diff$temp_hobo_c
+y3 <- lol_temp_diff$diff
+x <- lol_temp_diff$date_time
+
+highchart() %>% 
+  hc_add_series(data = y1, dashStyle="solid") %>% 
+  hc_add_series(data = y2, yAxis = 1) %>% 
+  hc_add_series(data = y3, yAxis = 2) %>%
+  hc_yAxis_multiples(
+     list(lineWidth = 3, lineColor='#D55E00', title=list(text="durafet")),
+     list(lineWidth = 3, lineColor="#009E73", title=list(text="hobo")),
+     list(lineWidth = 3, lineColor="#0072B2", title=list(text="diff"))) %>%
+    hc_xAxis(title = "Date", categories = x, breaks=10) %>%
+  hc_colors(c("#D55E00","#009E73", "#0072B2"))
+
+#Join pH, temp data with tide data
+lol_all <- full_join(lol_all_1, lol_tide) %>%
+  drop_na(c(tide, p_h)) %>% #remove unnecessary tide values
+  dplyr::rename(temp_c=temp_hobo_c) 
+```
+
+### Remove measurements where the sensor pool was disconnected from the ocean (at a tide lower than +0.5, likely higher (TBD))
+```{r}
+lol_detide <- lol_all %>%
+  filter(tide>0.5)
+
+ggplot(lol_detide, aes(x=date_time)) +
+  geom_line(aes(y=tide), color="red") + 
+  geom_line(aes(y=temp_c), color="blue") +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+```
+
+### So now, let's filter based on anomalous pH measurements
+```{r}
+lol_detide_temp_ph <- lol_all %>%
+  filter(tide>1.5) %>%
+  arrange(date_time) %>% #make sure observations are in order by date/time
+  mutate(diff3 = p_h - lag(p_h, default = first(p_h))) #doesn't look like pH values jump extraordinarily
+
+ggplot(lol_detide_temp_ph, aes(x=date_time)) +
+  geom_line(aes(y=p_h), color="blue") +
+  geom_line(aes(y=diff3), color="green") +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+#And plot it up 
+ggplot(lol_detide_temp_ph, aes(x=date_time)) +
+  geom_line(aes(y=p_h), color="#009E73") + 
+  geom_line(aes(y=temp_c), color="#D55E00") + # Divide by 10 to get the same range than the temperature
+  geom_line(aes(y=tide), color="#0072B2") + # Divide by 10 to get the same range than the temperature
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  annotate(geom="text", x=as.POSIXct("2021-09-24 00:01:00"), y=19, hjust=0, label="Temp (C)", color="#D55E00", size=5) +
+  annotate(geom="text", x=as.POSIXct("2021-6-14 00:01:00"), y=9, hjust=-0.1, label="pH", color="#009E73", size=5) +
+  annotate(geom="text", x=as.POSIXct("2021-6-14 00:01:00"), y=6, hjust=0, label="Tide", color="#0072B2", size=5) +
+  xlab("Date & time") +
+  ylab("Value") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_text(size=15),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=15))
+
+#ggsave(here("figures", "lol_detide_tide-temp.png"), height=20, width=40, units="cm")
+```
+
+### Use wave data to check tide vs temperature stuff
+```{r}
+#look at July NOAA NDBC data from Santa Maria buoy 
+lol_wave <- read_csv(here("data","wave-july2021.csv")) %>% 
+  clean_names() %>%
+  filter(wvht<99.00) %>%
+  mutate(mn=mn+5) %>%
+  unite("date", "year", "month", "day", sep="/") %>%
+  unite("time", "hr", "mn", sep=":") %>%
+  unite("date_time", "date", "time", sep=" ") %>%
+  mutate(date_time=ymd_hm(date_time)) #apply lubridate to date and time
+
+#join this with the july sensor df
+lol_july <- lol_all %>%
+  filter(date_time < ymd_hms("2021-08-01 00:00:00"),
+         date_time > ymd_hms("2021-07-01 00:00:00"))
+
+lol_wave_join <- full_join(lol_july, lol_wave) %>%
+  fill(wvht, .direction = "updown") %>% #fill in empty wave measurements with previous values before
+  distinct(date_time, .keep_all = TRUE) %>% #remove duplicated data (not sure where those came from)
+  filter(date_time > ymd_hms("2021-07-20 00:00:00"),
+         date_time < ymd_hms("2021-07-25 00:00:00"))
+
+y1 <- lol_wave_join$temp_c
+y2 <- lol_wave_join$wvht
+y3 <- lol_wave_join$tide
+x <- lol_wave_join$date_time
+
+highchart() %>% 
+  hc_add_series(data = y1, dashStyle="solid") %>% 
+  hc_add_series(data = y2, yAxis = 1) %>% 
+  hc_add_series(data = y3, yAxis = 1) %>%
+  hc_yAxis_multiples(
+     list(lineWidth = 3, lineColor='#D55E00', title=list(text="Temp")),
+     list(lineWidth = 3, lineColor="#009E73", title=list(text="Wave Height")),
+     list(lineWidth = 3, lineColor="#0072B2", title=list(text="Tide cycle"))) %>%
+    hc_xAxis(title = "Date", categories = x, breaks=10) %>%
+  hc_colors(c("#D55E00",
+              "#009E73",
+              "#0072B2"))
+```
+The wave data isn't a magic bullet, but it does look like I might be overprocessing the data if I make the tide height as high as 3.0. Based on the July data (especially keeping in mind temperature changes will be most apparent in the middle of the day when the sun is out in full force), I'm going to remove any data below a tide height of 2.0
+
+### Let's move on to continuing to process the data for "out of water"
+### Create df for LOL with values above tides of +3.232, and remove (or smooth?) anomalous time periods
+```{r}
+lol_detided <- lol_detide_temp_ph %>%
+  filter(tide>3.232) %>%
+  filter(!(date_time >= ymd_hms("2021-07-31 13:30:00") & date_time <= ymd_hms("2021-07-31 14:00:00")),
+         (date_time != ymd_hms("2021-09-15 09:15:00")),
+         !(date_time >= ymd_hms("2021-09-16 01:30:00") & date_time <= ymd_hms("2021-09-16 02:45:00")), #anomalous points here identified by comparing durafet and hobo temp logger values
+         !(date_time >= ymd_hms("2021-08-01 13:45:00") & date_time < ymd_hms("2021-08-01 15:00:00"))) %>%
+  drop_na() #remove times with tides but without pH values
+```
+
+## ALG 
+
+### Scrape tide data from http://tbone.biol.sc.edu/tide/
+```{r}
+alg_tide <- read_html("http://tide.arthroinfo.org/tideshow.cgi?tplotdir=horiz;gx=640;gy=240;caltype=ndp;type=mrare;interval=00%3A15;glen=150;units=feet;year=2021;month=06;day=12;hour=01;min=00;tzone=local;d_year=;d_month=01;d_day=01;d_hour=00;d_min=00;ampm24=24;site=Gaviota%2C%20California") %>%
+  html_elements("pre") %>% #select only the date, time, and tide values from the webpage
+  html_text2() %>% #convert list to data table
+  data.frame() %>% #convert table to data frame
+  mutate(date_tide = str_split(., pattern = "\n")) %>% #split into rows by each time point
+  unnest(date_tide) %>% #unnest into two columns 
+  mutate(date_tide=as.factor(date_tide)) %>% #make column values factors 
+  separate(date_tide, into = c("date", "space", "time", "time_zone", "tide"), sep="\\s") %>% #separate the values (separated by spaces) into their own columns
+  select(-"space", -".") %>% #remove the "space" (blank space) column and duplicated column created by unnest() 
+  unite("time", "time", "time_zone", sep="\ ",) %>% #join together time and time zone
+  unite("date_time", "date", "time", sep="\ ") %>% #join together date and time/time zone
+  drop_na() %>% #remove final row with NA (not sure why that's even there)
+  mutate(date_time=ymd_hm(date_time), #apply lubridate to date/time column
+         tide=as.numeric(tide)) #coerce tide values from character to numeric
+```
+
+### Combine the tides with the pH/temp values for ALG, plot it up!
+```{r}
+# filter all data for ALG
+alg <- all %>%
+  filter(site=="Alegria")
+
+#combine tide data with sensor data
+alg_all_1 <- full_join(alg, alg_tide) %>%
+  drop_na(c(temp_c)) #remove extra tide measurements
+
+#extract HOBO data
+alg_temp <- read_csv(here("data","hobo_alg.csv")) %>% 
+  filter(row_number()!=1) %>% # remove the first row
+  clean_names() %>%
+  dplyr::rename(timestamp=x2,
+         temp_hobo_f=x3) %>%
+  mutate(date_time=ymd_hms(timestamp), #aapply lubridate to date/time column
+         date=format(date_time, '%m/%d/%Y'), #create only date column
+         time=format(date_time, '%H:%M:%S'), #create only time column
+         temp_hobo_c=((as.numeric(temp_hobo_f)-32)*(5/9))) %>% #convert F to C from HOBO temp data
+  select(temp_hobo_c,date_time) #select the only columns that really matter
+
+# Join HOBO data to alegria df
+alg_all <- full_join(alg_all_1, alg_temp) %>%
+  drop_na(c(temp_c)) %>% #remove hobo measurements taken outside of Durafet measurements
+  dplyr::rename(temp_durafet_c=temp_c) 
+
+alg_plot <- alg_all %>%
+  pivot_longer(cols=temp_durafet_c:temp_hobo_c,
+               names_to = "data",
+               values_to = "value")
+  
+ggplot(alg_plot, aes(x=date_time, y=value, group=data)) +
+  geom_line(aes(color=data), size=0.7) +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+
+#ggsave(here("figures", "alg_pH_temp_tide.png"), height=20, width=40, units="cm")
+```
+
+### Remove anomalous measurements at beginning of deployment (sensor was likely inundated with sand)
+```{r}
+alg_desand <- alg_all %>%
+  filter(date_time > ymd_hms("2021-06-18 01:00:00")) %>% #super weird, but pH looks like it stabilizes at 1AM post sand
+  distinct(date_time, .keep_all = TRUE) #remove duplicated data (not sure where those came from)
+
+ggplot(alg_desand, aes(x=date_time, y=p_h)) +
+  geom_line(size=0.7) +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90))
+```
+
+### Detide ALG data and plot
+```{r}
+alg_detide <- alg_desand %>%
+  filter(tide>0.9)
+
+ggplot(alg_detide, aes(x=date_time)) +
+  geom_line(aes(y=p_h), color="#009E73") + 
+  geom_line(aes(y=temp_hobo_c), color="#D55E00") + # Divide by 10 to get the same range than the temperature
+  geom_line(aes(y=tide), color="#0072B2") + # Divide by 10 to get the same range than the temperature
+  scale_x_datetime(breaks = scales::date_breaks("4 days"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  annotate(geom="text", x=as.POSIXct("2021-6-18 00:01:00"), y=19, hjust=0, label="Temp (C)", color="#D55E00", size=5) +
+  annotate(geom="text", x=as.POSIXct("2021-6-18 00:01:00"), y=10, hjust=-0.1, label="pH", color="#009E73", size=5) +
+  annotate(geom="text", x=as.POSIXct("2021-6-18 00:01:00"), y=-1.5, hjust=0, label="Tide", color="#0072B2", size=5) +
+  xlab("Date & time") +
+  ylab("Value") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_text(size=15),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=15))
+
+#ggsave(here("figures", "alg_detide.png"), height=20, width=40, units="cm")
+```
+
+There's still some noise at a few dates, let's filter those dates out of the data
+### Remove (or smooth?) time periods with a LOT of noise
+```{r}
+alg_no_noise <- alg_detide %>%
+  mutate(p_h=ifelse((date_time > ymd_hms("2021-10-25 19:00:00") & date_time < ymd_hms("2021-11-02 10:45:00")), NA, p_h),
+         temp_hobo_c=ifelse((date_time > ymd_hms("2021-10-25 19:00:00") & date_time < ymd_hms("2021-11-02 10:45:00")), NA, temp_hobo_c)) %>% #since this is in the middle of the dataset, replace values with "NA" rather than remove entirely (otherwise when plotting, R will fill in the missing space with a straight line)
+  #filter(!(date_time > ymd_hms("2021-10-25 19:00:00") & date_time < ymd_hms("2021-11-02 10:45:00"))) %>% #looks like another time when the sensor was sanded
+  mutate(p_h=ifelse((date_time > ymd_hms("2021-07-17 11:00:00") & date_time < ymd_hms("2021-07-17 19:30:00")), NA, p_h),
+         temp_hobo_c=ifelse((date_time > ymd_hms("2021-07-17 11:00:00") & date_time < ymd_hms("2021-07-17 19:30:00")), NA, temp_hobo_c)) %>%
+    # filter(!(date_time > ymd_hms("2021-07-17 11:00:00") & date_time < ymd_hms("2021-07-17 19:30:00"))) %>% #this is a chunk of time with a lot of noise
+  mutate(p_h=ifelse((date_time > ymd_hms("2021-09-09 10:15:00") & date_time < ymd_hms("2021-09-09 13:00:00")), NA, p_h),
+         temp_hobo_c=ifelse((date_time > ymd_hms("2021-09-09 10:15:00") & date_time < ymd_hms("2021-09-09 13:00:00")), NA, temp_hobo_c)) %>%
+  #filter(!(date_time > ymd_hms("2021-09-09 10:15:00") & date_time < ymd_hms("2021-09-09 13:00:00"))) %>% #this is a chunk of time with a lot of noise
+  filter(!(date_time %in% (ymd_hms("2021-06-19 10:15:00", #remove individual time points with significant jumps in the wrong direction, identified using highchart
+                                  "2021-06-29 14:15:00",
+                                  "2021-06-29 15:30:00",
+                                  "2021-06-30 11:45:00",
+                                  "2021-06-30 14:15:00",
+                                  "2021-06-30 16:15:00",
+                                  "2021-06-30 19:15:00",
+                                  "2021-07-02 06:15:00",
+                                  "2021-07-02 07:45:00",
+                                  "2021-07-02 10:45:00",
+                                  "2021-07-04 09:45:00",
+                                  "2021-07-04 12:00:00",
+                                  "2021-07-04 15:15:00",
+                                  "2021-10-02 18:15:00",
+                                  "2021-10-09 11:15:00",
+                                  "2021-10-22 02:30:00",
+                                  "2021-10-22 08:15:00",
+                                  "2021-10-23 16:30:00",
+                                  "2021-10-25 06:45:00",
+                                  "2021-10-25 14:45:00",
+                                  "2021-10-25 15:00:00",
+                                  "2021-10-25 16:30:00"
+
+)))) %>%
+  dplyr::rename(temp_c=temp_hobo_c) #dplyr::rename this column so I can merge ALG with all other sites
+
+ggplot(alg_no_noise, aes(x=date_time)) +
+  geom_line(aes(y=p_h), color="#009E73") + 
+  geom_line(aes(y=temp_c), color="#D55E00") + # Divide by 10 to get the same range than the temperature
+  geom_line(aes(y=tide), color="#0072B2") + # Divide by 10 to get the same range than the temperature
+  scale_x_datetime(breaks = scales::date_breaks("4 days"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  annotate(geom="text", x=as.POSIXct("2021-6-18 00:01:00"), y=19, hjust=0, label="Temp (C)", color="#D55E00", size=5) +
+  annotate(geom="text", x=as.POSIXct("2021-6-18 00:01:00"), y=10, hjust=-0.1, label="pH", color="#009E73", size=5) +
+  annotate(geom="text", x=as.POSIXct("2021-6-18 00:01:00"), y=-1.5, hjust=0, label="Tide", color="#0072B2", size=5) +
+  xlab("Date & time") +
+  ylab("Value") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_text(size=15),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=15))
+```
+
+# Now let's actually plot up a comparison of the pH values across sites
+```{r}
+#join all sites into one df (and remove diff columns)
+ph_all <- merge_recurse(list(alg_no_noise, lol_detided, bml_detide_temp)) %>%
+  select(-diff3)
+
+#set order for sites
+ph_all$site <- factor(ph_all$site, levels=c("Lompoc Landing","Alegria","Bodega Bay"))
+
+#set custom color for sites
+pal <- c(
+  "Alegria" = "#D55E00",
+  "Lompoc Landing" = "#009E73", 
+  "Bodega Bay" = "#0072B2"
+)
+
+ggplot(ph_all, aes(x=date_time, y=p_h, group=site)) +
+  geom_line(aes(color=site), size=0.7, alpha=0.8) +
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  #xlab("Date and time") +
+  ylab("pH") +
+  theme_bw() +
+  theme(axis.text.x=element_blank(), 
+        #element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_blank(),
+        #element_text(size=15),
+        axis.text.y=element_text(size=12),
+        #axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=15),
+        legend.position = "none")
+
+ggsave(here("figures", "ph_all.png"), height=20, width=40, units="cm")
+
+# For presentations, highlight one line at a time per site
+#BML focal
+ph_all$site <- factor(ph_all$site, levels=c("Lompoc Landing","Alegria","Bodega Bay"))
+
+ggplot(ph_all, aes(x=date_time, y=p_h, group=site)) +
+  geom_line(aes(color=site, alpha=site), size=0.7) +
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  ylab("pH") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_text(size=15),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=15),
+        legend.position = "none") +
+  scale_alpha_manual(values=c(0.5,0.5,1))
+
+ggsave(here("figures", "ph_bml.png"), height=20, width=40, units="cm")
+
+#LOL focal
+ph_all$site <- factor(ph_all$site, levels=c("Alegria","Bodega Bay", "Lompoc Landing"))
+
+ggplot(ph_all, aes(x=date_time, y=p_h, group=site)) +
+  geom_line(aes(color=site, alpha=site), size=0.7) +
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  ylab("pH") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_text(size=15),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=15),
+        legend.position = "none") +
+  scale_alpha_manual(values=c(0.5,0.5,1))
+
+ggsave(here("figures", "ph_lol.png"), height=20, width=40, units="cm")
+
+#ALG focal
+ph_all$site <- factor(ph_all$site, levels=c("Lompoc Landing","Bodega Bay", "Alegria"))
+
+ggplot(ph_all, aes(x=date_time, y=p_h, group=site)) +
+  geom_line(aes(color=site, alpha=site), size=0.7) +
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date time") +
+  ylab("pH") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_text(size=15),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=15),
+        legend.position = "none") +
+  scale_alpha_manual(values=c(0.5,0.5,1))
+
+ggsave(here("figures", "ph_alg.png"), height=20, width=40, units="cm")
+
+# Save the "final" df to a .csv file
+write.csv(ph_all, here("data", "ph_clean.csv"), row.names = FALSE)
+```
+
+# Let's also compare temperature across sites
+```{r}
+#add site identity before joining
+bml_temp_join <- bml_detide_temp %>%
+  select(date_time, temp_c, p_h) %>%
+  mutate(site = "Bodega Bay")
+
+lol_temp_join <- lol_detided %>%
+  select(date_time, temp_c, p_h) %>%
+  mutate(site = "Lompoc Landing")
+
+alg_join <- alg_no_noise %>%
+  select(date_time, temp_c, p_h) %>%
+  mutate(site = "Alegria")
+
+#join these all together into one df
+temp_all <- merge_recurse(list(bml_temp_join, lol_temp_join, alg_join))
+
+#set order for sites
+temp_all$site <- factor(temp_all$site, levels=c("Lompoc Landing","Alegria","Bodega Bay"))
+
+#set custom color for sites
+pal <- c(
+  "Alegria" = "#D55E00",
+  "Lompoc Landing" = "#009E73", 
+  "Bodega Bay" = "#0072B2"
+)
+
+ggplot(temp_all, aes(x=date_time, y=temp_c, group=site)) +
+  geom_line(aes(color=site), size=0.7, alpha=0.8) +
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  xlab("Date and time") +
+  ylab("Temperature") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=12),
+        axis.title.x=element_text(size=15),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=15),
+        legend.position = "none")
+
+ggsave(here("figures", "temp_all.png"), height=20, width=40, units="cm")
+```
+
+## Let's try to combine pH and temperature plots into one grid
+
+```{r}
+all <- temp_all %>%
+  relocate(site, date_time, temp_c, p_h) %>%
+  dplyr::rename(Site=site) %>%
+  pivot_longer(cols=temp_c:p_h,
+               names_to = "group",
+               values_to = "value")
+
+#set order for sites
+all$Site <- factor(all$Site, levels=c("Lompoc Landing","Alegria","Bodega Bay"))
+
+#set custom color for sites
+pal <- c(
+  "Alegria" = "#D55E00",
+  "Lompoc Landing" = "#009E73", 
+  "Bodega Bay" = "#0072B2"
+)
+
+ggplot(all, aes(x=date_time, y=value, group=group)) +
+  geom_line(aes(color=Site), size=0.7, alpha=0.7) +
+  scale_color_manual(values = pal) + #color lines by custom site color palette
+  #geom_point(aes(color=group), size=0.5) +
+  scale_x_datetime(breaks = scales::date_breaks("1 week"), 
+                    labels = date_format("%m/%d %H:%m")) +
+  facet_grid(group ~ ., #facet wrap to create one panel for pH and one for temp
+             scales = "free_y",
+             switch="both",
+             labeller = as_labeller(c(temp_c = "Temperature (C)", p_h = "pH"))) + #customize strip labels
+  xlab("Date and time") +
+  ylab(NULL) + #remove "Value" from Y axis label
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, vjust = 1, hjust=1, size=22),
+        axis.title.x=element_text(size=30),
+        axis.text.y=element_text(size=22),
+        legend.text=element_text(size=22),
+        legend.title = element_blank(),
+        #element_text(size=25),
+        legend.position = c(0.92,0.95), #customize legend position on plot
+        #legend.key.size = unit(4,"line"),
+        #legend.key.height = unit(1,"cm"),
+        strip.background = element_blank(), #remove strip background from facet_grid
+        strip.text.y = element_text(size = 30),
+        strip.placement = "outside") + #place the strip outside of the plot
+  guides(colour = guide_legend(override.aes = list(size=5, alpha = 1)))
+
+ggsave(here("figures", "temp_all_facet.png"), height=50, width=60, units="cm")
+```
+
+Now, for some "Chan et al 2017" style analyses
+
+## Look at the frequency of pH values below 7.8 
+```{r}
+ph_7.8 <- ph_all %>%
+  #drop_na(c(tide)) %>%
+  mutate(threshold = ifelse(p_h<7.8, "below", "above")) %>%
+  filter(!is.na(p_h)) %>% #remove the times with anomalous pH readings that were replaced with NA
+  group_by(site, threshold) %>%
+  summarize(tot_observations = n()) %>%
+  ungroup() %>%
+  add_row(site="Alegria", threshold="below", tot_observations=0) #add this row because Alegria has 0 observations below 7.8 (for now...)
+
+#Get total number of observations - use double square brackets because it's a tibble
+lol_n <- ph_7.8[[1,3]] + ph_7.8[[2,3]] 
+bml_n <- ph_7.8[[3,3]] + ph_7.8[[4,3]]
+alg_n <- ph_7.8[[5,3]] + ph_7.8[[6,3]]
+
+#Get frequency of pH values below 7.8
+lol_7.8 <- ph_7.8[[2,3]]/lol_n
+bml_7.8 <- ph_7.8[[4,3]]/bml_n
+alg_7.8 <- ph_7.8[[6,3]]/alg_n
+```
+
+# Create a nice table
+```{r}
+#create df for ALG without NA values
+alg_no_na <- alg_no_noise %>%
+  filter(!is.na(p_h))
+  
+# Calculate min, max, average pH values for each site
+alg_min <- (min(alg_no_na$p_h))
+alg_max <- (max(alg_no_na$p_h))
+alg_median <- (median(alg_no_na$p_h))
+alg_mean <- (mean(alg_no_na$p_h))
+alg_sd <- (sd(alg_no_na$p_h))
+alg_cv <- (alg_sd/alg_mean)*100 #coefficient of variation
+
+lol_min <- (min(lol_detided$p_h))
+lol_max <- (max(lol_detided$p_h))
+lol_median <- (median(lol_detided$p_h))
+lol_mean <- (mean(lol_detided$p_h))
+lol_sd <- (sd(lol_detided$p_h))
+lol_cv <- (lol_sd/lol_mean)*100 #coefficient of variation
+
+bml_min <- (min(bml_detide_temp$p_h))
+bml_max <- (max(bml_detide_temp$p_h))
+bml_median <- (median(bml_detide_temp$p_h))
+bml_mean <- (mean(bml_detide_temp$p_h))
+bml_sd <- (sd(bml_detide_temp$p_h))
+bml_cv <- (bml_sd/bml_mean)*100 #coefficient of variation
+
+ph_table <- tribble(
+  ~"Site", ~"Min pH", ~"Max pH", ~"Median pH",  ~"CV", ~"< 7.8", 
+  "Bodega Marine Lab", bml_min, bml_max, bml_median, bml_cv, bml_7.8,
+  "Lompoc Landing", lol_min, lol_max, lol_median, lol_cv, lol_7.8,
+  "Alegria", alg_min, alg_max, alg_median, alg_cv, alg_7.8) 
+
+ph_table %>%
+  gt() %>%
+  fmt_number(
+  columns = c("Min pH":"Median pH"),
+  rows = everything(),
+  decimals = 2) %>%
+  data_color(
+    columns = c("Site"),
+    colors = scales::col_factor( # <- bc it's a factor
+      palette = c("#D55E00","#0072B2","#009E73"),
+      domain = c("Bodega Marine Lab", "Lompoc Landing", "Alegria"))) %>%
+  gtsave(here("figures", "table_ph.png"))
+
+# Calculate min, max, average temp values for each site
+alg_min <- (min(alg_no_na$temp_c))
+alg_max <- (max(alg_no_na$temp_c))
+alg_median <- (median(alg_no_na$temp_c))
+alg_mean <- (mean(alg_no_na$temp_c))
+alg_sd <- (sd(alg_no_na$temp_c))
+alg_cv <- (alg_sd/alg_mean)*100 #coefficient of variation
+
+lol_min <- (min(lol_detided$temp_c))
+lol_max <- (max(lol_detided$temp_c))
+lol_median <- (median(lol_detided$temp_c))
+lol_mean <- (mean(lol_detided$temp_c))
+lol_sd <- (sd(lol_detided$temp_c))
+lol_cv <- (lol_sd/lol_mean)*100 #coefficient of variation
+
+bml_min <- (min(bml_detide_temp$temp_c))
+bml_max <- (max(bml_detide_temp$temp_c))
+bml_median <- (median(bml_detide_temp$temp_c))
+bml_mean <- (mean(bml_detide_temp$temp_c))
+bml_sd <- (sd(bml_detide_temp$temp_c))
+bml_cv <- (bml_sd/bml_mean)*100 #coefficient of variation
+
+temp_table <- tribble(
+  ~"Site", ~"Min temp", ~"Max temp", ~"Median temp",  ~"CV", 
+  "Bodega Marine Lab", bml_min, bml_max, bml_median, bml_cv,
+  "Lompoc Landing", lol_min, lol_max, lol_median, lol_cv,
+  "Alegria", alg_min, alg_max, alg_median, alg_cv) 
+
+temp_table %>%
+  gt() %>%
+  fmt_number(
+  columns = c("Min temp":"Median temp"),
+  rows = everything(),
+  decimals = 2) %>%
+  data_color(
+    columns = c("Site"),
+    colors = scales::col_factor( # <- bc it's a factor
+      palette = c("#D55E00","#0072B2","#009E73"),
+      domain = c("Bodega Marine Lab", "Lompoc Landing", "Alegria"))) %>%
+  gtsave(here("figures", "table_temp.png"))
+```
+
+# Summary (what I did)
+
+At BML, sampling interval started at every 10 minutes and then switched to 15 minutes for all sites
+
+Filtering for tide heights based on temp/pH patterns
+- All points at ALG were removed at tide heights below 0.9
+- All points at LOL were removed at tide heights below 2.0 (3.232 was also a good option, but I don't want to remove more values than need be... ask about this) 
+- All points at BML were removed at tide heights below 0.2
+
+Removed additional anomalous time points (noise or major jumps, especially in wrong direction)
+- 20 from BML
+- All data collected before 06/18/2021 at ALG, data collected between 10/25/2021 and 11/02/2021, plus 65 extra points
+- 9 from LOL
+
+# Next: zoom in on LOL as an example of pH variation within tidepool
+### Create df (remove anomalous points) - use this for "lol-analysis.Rmd"
+```{r}
+lol_cycle <- lol_all %>%
+    drop_na() %>% #remove times with tides but without pH values
+  filter(!(date_time >= ymd_hms("2021-07-31 13:30:00") & date_time <= ymd_hms("2021-07-31 14:00:00")), #remove anomalous points (major jumps in pH)
+         !(date_time >= ymd_hms("2021-08-01 13:45:00") & date_time <= ymd_hms("2021-08-01 15:00:00")),
+         !(date_time >= ymd_hms("2021-06-26 16:45:00") & date_time <= ymd_hms("2021-06-26 18:00:00")),
+         !(date_time == ymd_hms("2021-07-13 08:00:00")),
+         !(date_time == ymd_hms("2021-08-19 03:30:00")),
+         !(date_time == ymd_hms("2021-09-15 09:15:00")),
+         !(date_time == ymd_hms("2021-08-20 00:15:00"))) %>%
+  mutate(cycle=ifelse(tide>=3.232, "high", "low"))
+
+
+# Save the "final" df to a .csv file
+write.csv(lol_cycle, here("data", "lol_all.csv"), row.names = FALSE)
+```
+
+
+Next steps:
+1. Talk to someone about overfiltering vs underfiltering LOL data - 3.232 tide vs 2.0 tide
+2. Triple check filtering of all sites (for pH and temp anomalies) so data can be published
