@@ -1,0 +1,169 @@
+---
+title: "LOL full tide cycle analysis"
+author: "Amelia Ritger"
+date: "11/9/2021"
+output: html_document
+---
+
+Zoom in on LOL as an example of pH variation within tidepool
+
+#Load packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+library(lubridate)
+library(plotly) #create plots with multiple y axes
+library(highcharter) #create highcart to interact with data
+library(gt) #create gt table
+```
+
+#Load data
+```{r}
+lol_cycle <- read_csv(here("data","lol_all.csv"))
+```
+ 
+## Plot up all data from LOL to show extent of pH and temperature drops within pool - code from Li (thank you)
+```{r}
+figure <- function(df_input,name) {
+  
+m <- list(
+  l = 10,
+  r = 10,
+  b = 30,
+  t = 30,
+  pad = 4
+)
+
+fig <- plot_ly(width = 1800)
+ 
+ fig <- fig %>% 
+   add_trace(data = df_input, y=~p_h, x = ~date_time, name = "pH", yaxis = "y1", mode = "lines", type = "scatter", line=list(color="green")) 
+
+y2 <- list(
+  tickfont = list(color = "red", size=20),
+  titlefont = list(color = "red", size=30),
+  overlaying = "y",
+  side = "left",
+  anchor="free",
+  position=0.02,
+  title = "Temperature (\u00B0C)")
+
+fig <- fig %>% 
+  add_trace(data =df_input, y=~temp_c, x = ~date_time, name = "Temperature (\u00B0C)", yaxis = "y2", mode = "lines", type = "scatter", line=list(color="red"))
+
+fig <- fig %>% 
+  layout(
+    title = list(text=name,xanchor = 'center', yanchor =  'top'),
+    font= list(size = 20),
+    yaxis2 = y2, #yaxis3 = y3,
+    xaxis = list(title = 'Date',
+                 domain = c(0.1, 1),
+                 tick0 = "2021-06-14 08:00:00",
+                 dtick = 7*86400000.0, 
+                 tickformat="%d-%b",
+                 titlefont = list(size = 30),
+                 tickfont = list(size = 20)),
+    yaxis = list(title = "pH",
+              tickfont = list(color = "green", size=20),
+              titlefont = list(color = "green", size=30),
+              side="left",
+              anchor="free",
+              position=0.08),
+  showlegend = FALSE,
+  margin = m)
+
+return(fig)
+
+}
+
+#save it
+
+lol_cycle_fig <- figure(lol_cycle,"Lompoc Landing")
+
+#orca(lol_cycle_fig, file="lol-cycle-full.png") #save plotly image
+#filesstrings::move_files("lol-cycle-full.png", here("figures", "sensors"), overwrite=TRUE) #move the image to the "Figures" folder
+```
+Alternatively, check out https://plotly.com/r/multiple-axes/
+
+## Zoom in on that period of time where pH jumped from 8.2 to 7.2
+```{r}
+lol_cycle_zoom <- lol_cycle %>%
+  filter(date_time < ymd_hms("2021-08-03 00:00:00"),
+         date_time > ymd_hms("2021-07-29 00:00:00"))
+
+y1 <- lol_cycle_zoom$temp_c
+y2 <- lol_cycle_zoom$temp_c
+y3 <- lol_cycle_zoom$tide
+x <- lol_cycle_zoom$date_time
+
+highchart() %>% 
+  hc_add_series(data = y1, dashStyle="solid") %>% 
+  hc_add_series(data = y2, yAxis = 1) %>% 
+  #hc_add_series(data = y3, yAxis = 1) %>%
+  hc_yAxis_multiples(
+     list(lineWidth = 3, lineColor='#D55E00', title=list(text="Temp")),
+     #list(lineWidth = 3, lineColor="#009E73", title=list(text="pH")),
+     list(lineWidth = 3, lineColor="#0072B2", title=list(text="pH"))) %>%
+    hc_xAxis(title = "Date", categories = x, breaks=10) %>%
+  hc_colors(c("#D55E00",
+              "#009E73",
+              "#0072B2"))
+```
+
+## Create a nice table
+```{r}
+#create df to look at frequency of low pH conditions
+lol_7.8 <- lol_cycle %>%
+  mutate(threshold = ifelse(p_h<7.8, "below", "above")) %>%
+  group_by(threshold) %>%
+  summarize(tot_observations = n())
+
+#Get total number of observations - use double square brackets because it's a tibble
+lol_n <- lol_7.8[[1,2]] + lol_7.8[[2,2]]
+
+#Get frequency of pH values below 7.8
+lol_freq <- lol_7.8[[2,2]]/lol_n
+  
+# Calculate min, max, average pH and temp values
+plol_min <- (min(lol_cycle$p_h))
+plol_max <- (max(lol_cycle$p_h))
+plol_median <- (median(lol_cycle$p_h))
+plol_mean <- (mean(lol_cycle$p_h))
+plol_sd <- (sd(lol_cycle$p_h))
+plol_cv <- (plol_sd/plol_mean)*100 #coefficient of variation
+
+tlol_min <- (min(lol_cycle$temp_c))
+tlol_max <- (max(lol_cycle$temp_c))
+tlol_median <- (median(lol_cycle$temp_c))
+tlol_mean <- (mean(lol_cycle$temp_c))
+tlol_sd <- (sd(lol_cycle$temp_c))
+tlol_cv <- (tlol_sd/tlol_mean)*100 #coefficient of variation
+
+#combine into a table
+ph_table <- tribble(
+  ~"Measurement", ~"Min", ~"Max", ~"Median",  ~"CV", ~"pH <7.8", 
+  "pH", plol_min, plol_max, plol_median, plol_cv, lol_freq,
+  "Temperature", tlol_min, tlol_max, tlol_median, tlol_cv, NA
+  )
+
+#make the table look nice
+ph_table %>%
+  gt() %>%
+  fmt_number(
+  columns = c("Min":"Median"),
+  rows = everything(),
+  decimals = 2) %>%
+  data_color(
+    columns = c("Measurement"),
+    colors = scales::col_factor( # <- bc it's a factor
+      palette = c("#117733","#882255"),
+      domain = c("pH", "Temperature"))) %>%
+  gtsave(here("figures", "table_lol.png"))
+```
+
+## Next steps:
+1. assess the greatest pH and temperature range in a 24 hour, 1 week period and monthly averages for LOL
+
+2. Re-filter all pH data based on HOBO temp data (especially, make annotations next to every single point/range that was filtered out, for future QC)
