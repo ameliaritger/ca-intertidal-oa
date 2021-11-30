@@ -20,7 +20,7 @@ library(scales) #for plotting time series data
 
 # Read in the data
 ```{r}
-raw <- read_csv(here("data","ph_clean.csv")) 
+raw <- read_csv(here("data","sensor-data_detided.csv"))
 
 alg <- raw %>%
   filter(site=="Alegria")
