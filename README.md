@@ -4,7 +4,7 @@
 
 These data were collected using Durafet-based pH sensors and HOBO temperature loggers with support from Dr. Francis Chan (OSU). Sensors were deployed in the rocky intertidal zone at three sites - Bodega Bay, Lompoc Landing, and Alegria - from May 2021 until November 2021. Sensors collected temperature and pH measurements every 15 minutes. Sites were selected because they 1) had been studied before, which would allow us to build upon historical datasets, 2) capture variation in oceanographic conditions attributed to California's two upwelling regimes, and 3) limit public access, which protects the valuable sensor equipment. 
 
-![Map of study sites in California](/media/site-map.png?raw=true)
+![Map of study sites in California](/media/site-map.jpg?raw=true)
 
 This repo is maintained by Hofmann Lab graduate student Amelia Ritger (GitHub: [@ameliaritger](https://github.com/ameliaritger)) at the University of California, Santa Barbara in the Department of Ecology, Evolution, & Marine Biology. In 2021, a group of UCSB undergraduate students worked with Amelia to create a Shiny app using these data to teach local high school students about ocean acidification. The Shiny app can be found [here](https://ameliaritger.shinyapps.io/intertidal-oa-module/). 
 
