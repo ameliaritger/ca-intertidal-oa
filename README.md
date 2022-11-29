@@ -13,7 +13,7 @@ This repo is maintained by Hofmann Lab graduate student Amelia Ritger (GitHub: [
 file name | analysis overview | description 
 ---|---|-----------
 filter-for-vis.Rmd | Smoothing pH and temperature data for easier visualization | This file uses the de-tided data created in `sensor-analysis.Rmd` and applies it to create a plot of the de-tided data plus a loess curve to visualize patterns across sites.
-lol-analysis.Rmd | Lompoc Landing sensor data wrangling without detiding the data | This file contains data analysis and visualization for the Lompoc Landing sensor, which includes data throughout the tide cycle due to the sensor's location within a tidepool and submerged at all times. The data used in this file has already been pre-processed in `sensor-analysis.Rmd`.
+lol-analysis.Rmd | Lompoc Landing sensor data wrangling without detiding the data | This file contains data analysis and visualization for the Lompoc Landing sensor, which includes data throughout the tide cycle due to the sensor's location within a tidepool and submerged at all times. The data used in this file have already been pre-processed in `sensor-analysis.Rmd`.
 sensor-analysis.Rmd | All sites sensor data wrangling for comparative analysis  | This file is the meat of the sensor data analysis. Includes scraping tide data, extracting HOBO temperature data, and applying these data to the Durafet pH dataset, and then identifying data outliers and de-tiding the data to compare conditions across sites.
 
 # Data 
